@@ -3,7 +3,8 @@ import json
 import time
 import random
 import logging
-from openai import OpenAI
+import requests
+
 from instagrapi import Client
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -14,16 +15,19 @@ logging.basicConfig(
 )
 log = logging.getLogger("SafiihBot")
 
-# ── Config (from Railway environment variables) ───────────────────────────────
+# ── Config ────────────────────────────────────────────────────────────────────
 IG_USERNAME  = os.environ["IG_USERNAME"]
 IG_PASSWORD  = os.environ["IG_PASSWORD"]
 GITHUB_TOKEN = os.environ["GITHUB_TOKEN"]
 THREAD_ID    = os.environ["THREAD_ID"]
 BOT_USERNAME = IG_USERNAME.lower()
 
-POLL_INTERVAL    = 10   # seconds between checks
-MAX_HISTORY      = 6    # conversation turns kept per user
-DATASET_SAMPLE   = 250  # shers sent to AI per request (token budget)
+GH_MODEL    = "meta/Llama-3.3-70B-Instruct"
+GH_ENDPOINT = "https://models.github.ai/inference/chat/completions"
+
+POLL_INTERVAL  = 10   # seconds between checks
+MAX_HISTORY    = 6    # conversation turns kept per user
+DATASET_SAMPLE = 250  # shers sent to AI per request
 
 # ── Load dataset ──────────────────────────────────────────────────────────────
 log.info("Loading poetry dataset...")
@@ -37,13 +41,28 @@ def sample_shers(n=DATASET_SAMPLE):
     sample = random.sample(ALL_SHERS, min(n, len(ALL_SHERS)))
     return "\n".join(f"[{s['poet']}] {s['misra1']} | {s['misra2']}" for s in sample)
 
-# ── AI client (GitHub Models) ─────────────────────────────────────────────────
-ai = OpenAI(
-    base_url="https://models.inference.ai.azure.com",
-    api_key=GITHUB_TOKEN,
-)
+# ── GitHub Models API call (same as Safiih web app) ──────────────────────────
+def call_github_model(messages):
+    headers = {
+        "Authorization": f"Bearer {GITHUB_TOKEN}",
+        "Content-Type": "application/json",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28"
+    }
+    body = {
+        "model": GH_MODEL,
+        "messages": messages,
+        "temperature": 0.8,
+        "max_tokens": 300,
+        "stream": False
+    }
+    resp = requests.post(GH_ENDPOINT, headers=headers, json=body, timeout=30)
+    resp.raise_for_status()
+    return resp.json()["choices"][0]["message"]["content"].strip()
 
-SYSTEM_PROMPT_TEMPLATE = """You are Safiih, an Urdu poetry companion bot in an Instagram group.
+# ── System prompt ─────────────────────────────────────────────────────────────
+def system_prompt():
+    return f"""You are Safiih, an Urdu poetry companion bot in an Instagram group.
 
 RULES:
 - Speak ONLY in English
@@ -52,16 +71,10 @@ RULES:
 - When sharing a sher always mention the poet
 - Be warm, passionate about poetry, and invite discussion
 
-POETS IN YOUR DATASET: {poets}
+POETS IN YOUR DATASET: {", ".join(POETS)}
 
 SAMPLE SHERS (format: [Poet] misra1 | misra2):
-{shers}"""
-
-def system_prompt():
-    return SYSTEM_PROMPT_TEMPLATE.format(
-        poets=", ".join(POETS),
-        shers=sample_shers()
-    )
+{sample_shers()}"""
 
 # ── Conversation memory ───────────────────────────────────────────────────────
 memory = {}  # { user_id: [ {role, content}, ... ] }
@@ -70,18 +83,12 @@ def ai_reply(user_id: str, text: str) -> str:
     hist = memory.setdefault(user_id, [])
     hist.append({"role": "user", "content": text})
 
-    # Trim old turns to save tokens
     if len(hist) > MAX_HISTORY * 2:
         memory[user_id] = hist[-(MAX_HISTORY * 2):]
 
     try:
-        resp = ai.chat.completions.create(
-            model="meta-llama-3.3-70b-instruct",
-            messages=[{"role": "system", "content": system_prompt()}, *memory[user_id]],
-            max_tokens=280,
-            temperature=0.75,
-        )
-        reply = resp.choices[0].message.content.strip()
+        messages = [{"role": "system", "content": system_prompt()}, *memory[user_id]]
+        reply = call_github_model(messages)
         memory[user_id].append({"role": "assistant", "content": reply})
         return reply
     except Exception as e:
@@ -122,8 +129,6 @@ def run():
     log.info(f"Watching thread {THREAD_ID} | Trigger: @{BOT_USERNAME}")
 
     seen = set()
-
-    # Seed existing messages so bot doesn't reply to old chat on startup
     for m in fetch_messages(20):
         seen.add(m.id)
     log.info(f"Seeded {len(seen)} existing messages")
