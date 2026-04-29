@@ -1,4 +1,4 @@
-import os
+
 import json
 import time
 import random
@@ -17,10 +17,10 @@ logging.basicConfig(
 log = logging.getLogger("SafiihBot")
 
 # ── Config ────────────────────────────────────────────────────────────────────
-IG_USERNAME  = os.environ["IG_USERNAME"]
-IG_PASSWORD  = os.environ["IG_PASSWORD"]
-GITHUB_TOKEN = os.environ["GITHUB_TOKEN"]
-THREAD_ID    = os.environ["THREAD_ID"]
+IG_USERNAME  = "safiihbot"
+IG_PASSWORD  = "saif.7890"
+GITHUB_TOKEN = "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"
+THREAD_ID    = "961868736232100"
 BOT_USERNAME = IG_USERNAME.lower()
 
 GH_MODEL    = "meta/Llama-3.3-70B-Instruct"
