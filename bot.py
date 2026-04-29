@@ -4,6 +4,7 @@ import time
 import random
 import logging
 import requests
+import re
 
 from instagrapi import Client
 
@@ -25,9 +26,9 @@ BOT_USERNAME = IG_USERNAME.lower()
 GH_MODEL    = "meta/Llama-3.3-70B-Instruct"
 GH_ENDPOINT = "https://models.github.ai/inference/chat/completions"
 
-POLL_INTERVAL  = 10   # seconds between checks
-MAX_HISTORY    = 6    # conversation turns kept per user
-DATASET_SAMPLE = 250  # shers sent to AI per request
+POLL_INTERVAL  = 10
+MAX_HISTORY    = 6
+DATASET_SAMPLE = 200
 
 # ── Load dataset ──────────────────────────────────────────────────────────────
 log.info("Loading poetry dataset...")
@@ -37,11 +38,74 @@ with open("poetry-dataset.json", encoding="utf-8") as f:
 POETS = sorted(set(s["poet"] for s in ALL_SHERS))
 log.info(f"{len(ALL_SHERS)} shers | {len(POETS)} poets loaded")
 
-def sample_shers(n=DATASET_SAMPLE):
-    sample = random.sample(ALL_SHERS, min(n, len(ALL_SHERS)))
-    return "\n".join(f"[{s['poet']}] {s['misra1']} | {s['misra2']}" for s in sample)
+# ── Dataset search functions ──────────────────────────────────────────────────
+def get_random_sher():
+    s = random.choice(ALL_SHERS)
+    return f"{s['misra1']}\n{s['misra2']}\n— {s['poet']}"
 
-# ── GitHub Models API call (same as Safiih web app) ──────────────────────────
+def get_sher_by_poet(poet_name: str, count: int = 1):
+    """Find shers by poet name (fuzzy match)."""
+    poet_lower = poet_name.lower()
+    matches = [s for s in ALL_SHERS if poet_lower in s["poet"].lower()]
+    if not matches:
+        return None
+    selected = random.sample(matches, min(count, len(matches)))
+    return "\n\n".join(f"{s['misra1']}\n{s['misra2']}\n— {s['poet']}" for s in selected)
+
+def search_shers_by_keyword(keyword: str, count: int = 2):
+    """Search shers containing a keyword in either misra."""
+    kw = keyword.lower()
+    matches = [
+        s for s in ALL_SHERS
+        if kw in s.get("misra1", "").lower() or kw in s.get("misra2", "").lower()
+    ]
+    if not matches:
+        return None
+    selected = random.sample(matches, min(count, len(matches)))
+    return "\n\n".join(f"{s['misra1']}\n{s['misra2']}\n— {s['poet']}" for s in selected)
+
+def detect_poet_request(text: str):
+    """Check if user is asking for a sher by a specific poet."""
+    text_lower = text.lower()
+    for poet in POETS:
+        if poet.lower() in text_lower:
+            return poet
+    return None
+
+def detect_random_request(text: str):
+    """Check if user wants a random sher."""
+    triggers = ["random", "koi sher", "کوئی شعر", "sher sunao", "share a sher", 
+                "any sher", "ek sher", "ایک شعر", "sher suno", "poem", "verse"]
+    text_lower = text.lower()
+    return any(t in text_lower for t in triggers)
+
+def get_dataset_context(user_message: str):
+    """
+    Try to fulfill request directly from dataset.
+    Returns (direct_reply, context_shers) tuple.
+    direct_reply = a ready string to send if we can answer directly
+    context_shers = relevant shers to add to AI prompt for context
+    """
+    # Check for poet-specific request
+    poet = detect_poet_request(user_message)
+    if poet:
+        shers = get_sher_by_poet(poet, count=2)
+        if shers:
+            log.info(f"Fetched shers for poet: {poet}")
+            return shers, shers
+
+    # Check for random sher request
+    if detect_random_request(user_message):
+        sher = get_random_sher()
+        log.info("Fetched random sher from dataset")
+        return sher, sher
+
+    # Otherwise just provide sample context for AI
+    sample = random.sample(ALL_SHERS, min(DATASET_SAMPLE, len(ALL_SHERS)))
+    context = "\n".join(f"[{s['poet']}] {s['misra1']} | {s['misra2']}" for s in sample)
+    return None, context
+
+# ── GitHub Models API ─────────────────────────────────────────────────────────
 def call_github_model(messages):
     headers = {
         "Authorization": f"Bearer {GITHUB_TOKEN}",
@@ -61,7 +125,7 @@ def call_github_model(messages):
     return resp.json()["choices"][0]["message"]["content"].strip()
 
 # ── System prompt ─────────────────────────────────────────────────────────────
-def system_prompt():
+def system_prompt(context_shers: str):
     return f"""You are Safiih, an Urdu poetry companion bot in an Instagram group.
 
 RULES:
@@ -70,24 +134,35 @@ RULES:
 - Only discuss Urdu poetry topics
 - When sharing a sher always mention the poet
 - Be warm, passionate about poetry, and invite discussion
+- If shers are provided in DATASET CONTEXT, use them in your reply
 
 POETS IN YOUR DATASET: {", ".join(POETS)}
 
-SAMPLE SHERS (format: [Poet] misra1 | misra2):
-{sample_shers()}"""
+DATASET CONTEXT (real shers from the dataset):
+{context_shers}"""
 
 # ── Conversation memory ───────────────────────────────────────────────────────
-memory = {}  # { user_id: [ {role, content}, ... ] }
+memory = {}
 
 def ai_reply(user_id: str, text: str) -> str:
     hist = memory.setdefault(user_id, [])
-    hist.append({"role": "user", "content": text})
+
+    # Try to get direct answer or context from dataset
+    direct_reply, context_shers = get_dataset_context(text)
+
+    # If we have a direct reply (poet/random request), send it straight away
+    # but still run it through AI to add a nice intro line
+    if direct_reply:
+        prompt = f"The user asked: '{text}'\nHere are real shers from the dataset to share:\n{direct_reply}\nPresent these shers naturally with a warm one-line intro. Keep it brief."
+        hist.append({"role": "user", "content": prompt})
+    else:
+        hist.append({"role": "user", "content": text})
 
     if len(hist) > MAX_HISTORY * 2:
         memory[user_id] = hist[-(MAX_HISTORY * 2):]
 
     try:
-        messages = [{"role": "system", "content": system_prompt()}, *memory[user_id]]
+        messages = [{"role": "system", "content": system_prompt(context_shers)}, *memory[user_id]]
         reply = call_github_model(messages)
         memory[user_id].append({"role": "assistant", "content": reply})
         return reply
@@ -121,7 +196,7 @@ def mentioned(text: str) -> bool:
     return bool(text) and f"@{BOT_USERNAME}" in text.lower()
 
 def strip_mention(text: str) -> str:
-    return text.lower().replace(f"@{BOT_USERNAME}", "").strip() or "Share a sher with me"
+    return text.lower().replace(f"@{BOT_USERNAME}", "").strip() or "share a random sher"
 
 # ── Main loop ─────────────────────────────────────────────────────────────────
 def run():
