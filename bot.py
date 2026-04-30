@@ -1,12 +1,8 @@
-
 import json
 import time
 import random
 import logging
 import requests
-import re
-
-from instagrapi import Client
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -17,18 +13,17 @@ logging.basicConfig(
 log = logging.getLogger("SafiihBot")
 
 # ── Config ────────────────────────────────────────────────────────────────────
-IG_USERNAME  = "safiihbot"
-IG_PASSWORD  = "saif.7890"
+BOT_TOKEN    = "8779033281:AAHYmLn2J7yUCQEijuVe9ursWD3cwa59eks"
+GROUP_ID     = "-1003787941813"
 GITHUB_TOKEN = "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"
-THREAD_ID    = "961868736232100"
-BOT_USERNAME = IG_USERNAME.lower()
+BOT_USERNAME = "safiihpoetry_bot"
 
-GH_MODEL    = "meta/Llama-3.3-70B-Instruct"
-GH_ENDPOINT = "https://models.github.ai/inference/chat/completions"
+GH_MODEL     = "meta/Llama-3.3-70B-Instruct"
+GH_ENDPOINT  = "https://models.github.ai/inference/chat/completions"
+TG_API       = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
-POLL_INTERVAL  = 10
-MAX_HISTORY    = 6
 DATASET_SAMPLE = 200
+MAX_HISTORY    = 6
 
 # ── Load dataset ──────────────────────────────────────────────────────────────
 log.info("Loading poetry dataset...")
@@ -38,75 +33,44 @@ with open("poetry-dataset.json", encoding="utf-8") as f:
 POETS = sorted(set(s["poet"] for s in ALL_SHERS))
 log.info(f"{len(ALL_SHERS)} shers | {len(POETS)} poets loaded")
 
-# ── Dataset search functions ──────────────────────────────────────────────────
+# ── Dataset functions ─────────────────────────────────────────────────────────
 def get_random_sher():
     s = random.choice(ALL_SHERS)
-    return f"{s['misra1']}\n{s['misra2']}\n— {s['poet']}"
+    return f"{s['misra1']}\n{s['misra2']}\n\n— {s['poet']}"
 
-def get_sher_by_poet(poet_name: str, count: int = 1):
-    """Find shers by poet name (fuzzy match)."""
-    poet_lower = poet_name.lower()
-    matches = [s for s in ALL_SHERS if poet_lower in s["poet"].lower()]
+def get_sher_by_poet(poet_name: str):
+    matches = [s for s in ALL_SHERS if poet_name.lower() in s["poet"].lower()]
     if not matches:
         return None
-    selected = random.sample(matches, min(count, len(matches)))
-    return "\n\n".join(f"{s['misra1']}\n{s['misra2']}\n— {s['poet']}" for s in selected)
+    s = random.choice(matches)
+    return f"{s['misra1']}\n{s['misra2']}\n\n— {s['poet']}"
 
-def search_shers_by_keyword(keyword: str, count: int = 2):
-    """Search shers containing a keyword in either misra."""
-    kw = keyword.lower()
-    matches = [
-        s for s in ALL_SHERS
-        if kw in s.get("misra1", "").lower() or kw in s.get("misra2", "").lower()
-    ]
-    if not matches:
-        return None
-    selected = random.sample(matches, min(count, len(matches)))
-    return "\n\n".join(f"{s['misra1']}\n{s['misra2']}\n— {s['poet']}" for s in selected)
-
-def detect_poet_request(text: str):
-    """Check if user is asking for a sher by a specific poet."""
-    text_lower = text.lower()
+def detect_poet(text: str):
     for poet in POETS:
-        if poet.lower() in text_lower:
+        if poet.lower() in text.lower():
             return poet
     return None
 
-def detect_random_request(text: str):
-    """Check if user wants a random sher."""
-    triggers = ["random", "koi sher", "کوئی شعر", "sher sunao", "share a sher", 
-                "any sher", "ek sher", "ایک شعر", "sher suno", "poem", "verse"]
-    text_lower = text.lower()
-    return any(t in text_lower for t in triggers)
+def is_random_request(text: str):
+    triggers = ["random", "koi sher", "sher sunao", "share a sher",
+                "any sher", "ek sher", "sher suno", "poem", "verse",
+                "کوئی شعر", "ایک شعر", "شعر سناؤ"]
+    return any(t in text.lower() for t in triggers)
 
-def get_dataset_context(user_message: str):
-    """
-    Try to fulfill request directly from dataset.
-    Returns (direct_reply, context_shers) tuple.
-    direct_reply = a ready string to send if we can answer directly
-    context_shers = relevant shers to add to AI prompt for context
-    """
-    # Check for poet-specific request
-    poet = detect_poet_request(user_message)
+def get_context(text: str):
+    poet = detect_poet(text)
     if poet:
-        shers = get_sher_by_poet(poet, count=2)
-        if shers:
-            log.info(f"Fetched shers for poet: {poet}")
-            return shers, shers
-
-    # Check for random sher request
-    if detect_random_request(user_message):
+        shers = get_sher_by_poet(poet)
+        return shers, shers
+    if is_random_request(text):
         sher = get_random_sher()
-        log.info("Fetched random sher from dataset")
         return sher, sher
-
-    # Otherwise just provide sample context for AI
     sample = random.sample(ALL_SHERS, min(DATASET_SAMPLE, len(ALL_SHERS)))
     context = "\n".join(f"[{s['poet']}] {s['misra1']} | {s['misra2']}" for s in sample)
     return None, context
 
-# ── GitHub Models API ─────────────────────────────────────────────────────────
-def call_github_model(messages):
+# ── GitHub Models AI ──────────────────────────────────────────────────────────
+def call_ai(messages):
     headers = {
         "Authorization": f"Bearer {GITHUB_TOKEN}",
         "Content-Type": "application/json",
@@ -124,9 +88,8 @@ def call_github_model(messages):
     resp.raise_for_status()
     return resp.json()["choices"][0]["message"]["content"].strip()
 
-# ── System prompt ─────────────────────────────────────────────────────────────
-def system_prompt(context_shers: str):
-    return f"""You are Safiih, an Urdu poetry companion bot in an Instagram group.
+def system_prompt(context):
+    return f"""You are Safiih, an Urdu poetry companion bot in a Telegram group.
 
 RULES:
 - Speak ONLY in English
@@ -138,22 +101,18 @@ RULES:
 
 POETS IN YOUR DATASET: {", ".join(POETS)}
 
-DATASET CONTEXT (real shers from the dataset):
-{context_shers}"""
+DATASET CONTEXT:
+{context}"""
 
 # ── Conversation memory ───────────────────────────────────────────────────────
 memory = {}
 
 def ai_reply(user_id: str, text: str) -> str:
     hist = memory.setdefault(user_id, [])
+    direct, context = get_context(text)
 
-    # Try to get direct answer or context from dataset
-    direct_reply, context_shers = get_dataset_context(text)
-
-    # If we have a direct reply (poet/random request), send it straight away
-    # but still run it through AI to add a nice intro line
-    if direct_reply:
-        prompt = f"The user asked: '{text}'\nHere are real shers from the dataset to share:\n{direct_reply}\nPresent these shers naturally with a warm one-line intro. Keep it brief."
+    if direct:
+        prompt = f"User asked: '{text}'\nShare these shers naturally with a warm one-line intro:\n{direct}"
         hist.append({"role": "user", "content": prompt})
     else:
         hist.append({"role": "user", "content": text})
@@ -162,76 +121,67 @@ def ai_reply(user_id: str, text: str) -> str:
         memory[user_id] = hist[-(MAX_HISTORY * 2):]
 
     try:
-        messages = [{"role": "system", "content": system_prompt(context_shers)}, *memory[user_id]]
-        reply = call_github_model(messages)
+        msgs = [{"role": "system", "content": system_prompt(context)}, *memory[user_id]]
+        reply = call_ai(msgs)
         memory[user_id].append({"role": "assistant", "content": reply})
         return reply
     except Exception as e:
         log.error(f"AI error: {e}")
         return "I'm lost in a ghazal for a moment — please try again. 🌹"
 
-# ── Instagram ─────────────────────────────────────────────────────────────────
-ig = Client()
-
-def login():
-    log.info("Logging in to Instagram...")
-    ig.login(IG_USERNAME, IG_PASSWORD)
-    log.info("Logged in ✅")
-
-def fetch_messages(limit=10):
+# ── Telegram API functions ────────────────────────────────────────────────────
+def get_updates(offset=None):
+    params = {"timeout": 30, "offset": offset}
     try:
-        return ig.direct_thread(THREAD_ID, amount=limit).messages
+        resp = requests.get(f"{TG_API}/getUpdates", params=params, timeout=35)
+        return resp.json().get("result", [])
     except Exception as e:
-        log.error(f"Fetch error: {e}")
+        log.error(f"getUpdates error: {e}")
         return []
 
-def send(text: str):
+def send_message(chat_id, text, reply_to=None):
+    data = {"chat_id": chat_id, "text": text}
+    if reply_to:
+        data["reply_to_message_id"] = reply_to
     try:
-        ig.direct_send(text, thread_ids=[THREAD_ID])
-        log.info(f"Sent: {text[:70]}")
+        requests.post(f"{TG_API}/sendMessage", data=data, timeout=15)
+        log.info(f"Sent: {text[:60]}")
     except Exception as e:
         log.error(f"Send error: {e}")
 
-def mentioned(text: str) -> bool:
-    return bool(text) and f"@{BOT_USERNAME}" in text.lower()
-
-def strip_mention(text: str) -> str:
-    return text.lower().replace(f"@{BOT_USERNAME}", "").strip() or "share a random sher"
-
 # ── Main loop ─────────────────────────────────────────────────────────────────
 def run():
-    login()
-    log.info(f"Watching thread {THREAD_ID} | Trigger: @{BOT_USERNAME}")
-
-    seen = set()
-    for m in fetch_messages(20):
-        seen.add(m.id)
-    log.info(f"Seeded {len(seen)} existing messages")
+    log.info(f"Safiih Telegram Bot started! @{BOT_USERNAME}")
+    log.info(f"Watching group: {GROUP_ID}")
+    offset = None
 
     while True:
-        try:
-            for msg in reversed(fetch_messages(10)):
-                if msg.id in seen:
-                    continue
-                seen.add(msg.id)
+        updates = get_updates(offset)
+        for update in updates:
+            offset = update["update_id"] + 1
+            msg = update.get("message", {})
+            text = msg.get("text", "")
+            chat_id = str(msg.get("chat", {}).get("id", ""))
+            user_id = str(msg.get("from", {}).get("id", ""))
+            msg_id  = msg.get("message_id")
 
-                if msg.item_type != "text":
-                    continue
+            # Only respond in the group
+            if chat_id != GROUP_ID:
+                continue
 
-                text = msg.text or ""
-                uid  = str(msg.user_id)
-                log.info(f"[{uid}] {text[:80]}")
+            # Only respond when @mentioned
+            if f"@{BOT_USERNAME}" not in text.lower():
+                continue
 
-                if mentioned(text):
-                    log.info("Mentioned — generating reply...")
-                    reply = ai_reply(uid, strip_mention(text))
-                    time.sleep(2)
-                    send(reply)
+            clean = text.lower().replace(f"@{BOT_USERNAME}", "").strip()
+            if not clean:
+                clean = "share a random sher"
 
-        except Exception as e:
-            log.error(f"Loop error: {e}")
+            log.info(f"Mentioned by {user_id}: {clean[:80]}")
+            reply = ai_reply(user_id, clean)
+            send_message(GROUP_ID, reply, reply_to=msg_id)
 
-        time.sleep(POLL_INTERVAL)
+        time.sleep(1)
 
 if __name__ == "__main__":
     run()
